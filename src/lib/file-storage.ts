@@ -64,9 +64,7 @@ export async function deleteStoredFile(
 ): Promise<void> {
   try {
     if (storedPath.startsWith(BLOB_PREFIX)) {
-      await del(storedPath.slice(BLOB_PREFIX.length), {
-        access: "private",
-      });
+     await del(storedPath.slice(BLOB_PREFIX.length));
       return;
     }
 
