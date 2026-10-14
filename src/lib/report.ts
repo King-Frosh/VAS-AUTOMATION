@@ -1,5 +1,5 @@
-import fs from "node:fs/promises";
-import path from "node:path";
+
+import { readStoredFile, storePrivateFile } from "./file-storage";
 import ExcelJS from "exceljs";
 import { and, between, eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/db";
@@ -15,17 +15,14 @@ import {
 import { REQUIRED_HEADERS } from "./ingest";
 import { sanitizeFilename, slugSegment, safeCellValue } from "./security";
 
-export const STORAGE_ROOT = path.join(process.cwd(), "storage");
-export const UPLOAD_DIR = path.join(STORAGE_ROOT, "uploads");
-export const REPORT_DIR = path.join(STORAGE_ROOT, "reports");
 export const WORKSHEET_NAME = "Unreconciled Logs";
 
-export async function ensureStorage() {
-  await fs.mkdir(UPLOAD_DIR, { recursive: true });
-  await fs.mkdir(REPORT_DIR, { recursive: true });
-}
-
-export function reportFilename(partner: Partner, service: Service, start: string, end: string) {
+export function reportFilename(
+  partner: Partner,
+  service: Service,
+  start: string,
+  end: string
+) {
   return sanitizeFilename(
     `BRICCS_VAS_Report_${slugSegment(partner.code)}_${slugSegment(service.serviceName)}_${start}_${end}.xlsx`
   );
@@ -57,14 +54,19 @@ type SourceRow = {
 };
 
 /**
- * Builds the single-worksheet workbook required by the specification:
- * exactly one worksheet named `Unreconciled Logs`, the nine original headers
- * in their original order, identifiers preserved as text.
+ * Builds the required single-worksheet workbook.
+ * The worksheet is named "Unreconciled Logs".
+ * The nine original headers and their order are preserved.
+ * Identifiers remain text to preserve leading zeroes.
  */
-export async function writeWorkbook(rows: SourceRow[], outPath: string): Promise<number> {
+export async function writeWorkbook(
+  rows: SourceRow[]
+): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
+
   wb.creator = "BRICCS VAS Revenue Console";
   wb.company = "BRICCS International Ideal Limited";
+
   const ws = wb.addWorksheet(WORKSHEET_NAME, {
     views: [{ state: "frozen", ySplit: 1 }],
     properties: { defaultRowHeight: 16 },
@@ -81,17 +83,37 @@ export async function writeWorkbook(rows: SourceRow[], outPath: string): Promise
     { header: "COUNT", key: "COUNT", width: 11 },
     { header: "REVENUE", key: "REVENUE", width: 15 },
   ];
+
   ws.columns = columns;
 
   const headerRow = ws.getRow(1);
+
   REQUIRED_HEADERS.forEach((h, i) => {
     const cell = headerRow.getCell(i + 1);
+
     cell.value = h;
-    cell.font = { bold: true, color: { argb: "FF12161A" }, size: 10 };
-    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE0D8C8" } };
-    cell.alignment = { vertical: "middle", horizontal: "center" };
-    cell.border = { bottom: { style: "thin", color: { argb: "FF12161A" } } };
+    cell.font = {
+      bold: true,
+      color: { argb: "FF12161A" },
+      size: 10,
+    };
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE0D8C8" },
+    };
+    cell.alignment = {
+      vertical: "middle",
+      horizontal: "center",
+    };
+    cell.border = {
+      bottom: {
+        style: "thin",
+        color: { argb: "FF12161A" },
+      },
+    };
   });
+
   headerRow.height = 20;
 
   for (const r of rows) {
@@ -106,13 +128,15 @@ export async function writeWorkbook(rows: SourceRow[], outPath: string): Promise
       COUNT: r.countValue ?? 0,
       REVENUE: Number(r.revenueValue ?? 0),
     });
-    // Identifiers stay text so leading zeroes survive.
+
+    // Preserve identifiers as text so leading zeroes survive.
     row.getCell("SERVICE ID").numFmt = "@";
     row.getCell("PRODUCT ID").numFmt = "@";
     row.getCell("PRICE POINT").numFmt = "@";
     row.getCell("DATE").numFmt = "@";
     row.getCell("COUNT").numFmt = "#,##0";
     row.getCell("REVENUE").numFmt = "#,##0.00";
+
     row.alignment = { vertical: "middle" };
   }
 
@@ -121,10 +145,8 @@ export async function writeWorkbook(rows: SourceRow[], outPath: string): Promise
     to: { row: 1, column: REQUIRED_HEADERS.length },
   };
 
-  const buf = Buffer.from(await wb.xlsx.writeBuffer());
-  await fs.mkdir(path.dirname(outPath), { recursive: true });
-  await fs.writeFile(outPath, buf);
-  return buf.byteLength;
+  // Return the workbook in memory instead of writing to local disk.
+  return Buffer.from(await wb.xlsx.writeBuffer());
 }
 
 export type BatchResult = {
@@ -153,8 +175,6 @@ export async function generateBatch(params: {
   createdByName?: string;
   uploadIds?: number[];
 }): Promise<BatchResult> {
-  await ensureStorage();
-
   const conditions = [
     sql`${vasLogRows.logDate} >= ${params.startDate}`,
     sql`${vasLogRows.logDate} <= ${params.endDate}`,
@@ -162,6 +182,7 @@ export async function generateBatch(params: {
     sql`${vasLogRows.partnerId} IS NOT NULL`,
     sql`${vasLogRows.serviceIdRef} IS NOT NULL`,
   ];
+
   if (params.uploadIds?.length) {
     conditions.push(inArray(vasLogRows.uploadId, params.uploadIds));
   }
@@ -174,20 +195,31 @@ export async function generateBatch(params: {
   const allInRange = await db
     .select()
     .from(vasLogRows)
-    .where(and(
-      sql`${vasLogRows.logDate} >= ${params.startDate}`,
-      sql`${vasLogRows.logDate} <= ${params.endDate}`,
-      params.uploadIds?.length ? inArray(vasLogRows.uploadId, params.uploadIds) : sql`true`
-    ));
+    .where(
+      and(
+        sql`${vasLogRows.logDate} >= ${params.startDate}`,
+        sql`${vasLogRows.logDate} <= ${params.endDate}`,
+        params.uploadIds?.length
+          ? inArray(vasLogRows.uploadId, params.uploadIds)
+          : sql`true`
+      )
+    );
 
   const sumCount = (rows: SourceRow[]) =>
     rows.reduce((a, r) => a + (r.countValue ?? 0), 0);
+
   const sumRevenue = (rows: SourceRow[]) =>
     rows.reduce((a, r) => a + Number(r.revenueValue ?? 0), 0);
 
-  const invalidRows = allInRange.filter((r) => (r as { matchStatus: string }).matchStatus === "invalid");
+  const invalidRows = allInRange.filter(
+    (r) =>
+      (r as { matchStatus: string }).matchStatus === "invalid"
+  );
+
   const unmatchedRows = allInRange.filter(
-    (r) => (r as { matchStatus: string }).matchStatus !== "matched" && (r as { matchStatus: string }).matchStatus !== "invalid"
+    (r) =>
+      (r as { matchStatus: string }).matchStatus !== "matched" &&
+      (r as { matchStatus: string }).matchStatus !== "invalid"
   );
 
   const [batch] = await db
@@ -205,38 +237,87 @@ export async function generateBatch(params: {
     })
     .returning();
 
-  // group by partner + service
+  // Group matched rows by partner and service.
   const groups = new Map<string, SourceRow[]>();
+
   for (const row of matched) {
     const key = `${row.partnerId}:${row.serviceIdRef}`;
-    groups.set(key, [...(groups.get(key) ?? []), row as unknown as SourceRow]);
+
+    groups.set(key, [
+      ...(groups.get(key) ?? []),
+      row as unknown as SourceRow,
+    ]);
   }
 
-  const partnerIds = [...new Set([...groups.keys()].map((k) => Number(k.split(":")[0])))];
-  const serviceIds = [...new Set([...groups.keys()].map((k) => Number(k.split(":")[1])))];
+  const partnerIds = [
+    ...new Set(
+      [...groups.keys()].map((k) => Number(k.split(":")[0]))
+    ),
+  ];
+
+  const serviceIds = [
+    ...new Set(
+      [...groups.keys()].map((k) => Number(k.split(":")[1]))
+    ),
+  ];
+
   const partnerRows = partnerIds.length
-    ? await db.select().from(partners).where(inArray(partners.id, partnerIds))
+    ? await db
+        .select()
+        .from(partners)
+        .where(inArray(partners.id, partnerIds))
     : [];
+
   const serviceRows = serviceIds.length
-    ? await db.select().from(services).where(inArray(services.id, serviceIds))
+    ? await db
+        .select()
+        .from(services)
+        .where(inArray(services.id, serviceIds))
     : [];
-  const partnerById = new Map(partnerRows.map((p) => [p.id, p]));
-  const serviceById = new Map(serviceRows.map((s) => [s.id, s]));
+
+  const partnerById = new Map(
+    partnerRows.map((p) => [p.id, p])
+  );
+
+  const serviceById = new Map(
+    serviceRows.map((s) => [s.id, s])
+  );
 
   const reports: GeneratedReport[] = [];
 
   for (const [key, rows] of groups) {
     const [pid, sid] = key.split(":").map(Number);
+
     const partner = partnerById.get(pid);
     const service = serviceById.get(sid);
+
     if (!partner || !service) continue;
 
-    // Sorted by source row so legitimate repeated records are preserved verbatim.
-    const sorted = [...rows].sort((a, b) => a.sourceRow - b.sourceRow);
-    const filename = reportFilename(partner, service, params.startDate, params.endDate);
-    const filePath = path.join(REPORT_DIR, filename);
-    const fileSize = await writeWorkbook(sorted, filePath);
+    // Preserve all legitimate repeated records and source-row order.
+    const sorted = [...rows].sort(
+      (a, b) => a.sourceRow - b.sourceRow
+    );
 
+    const filename = reportFilename(
+      partner,
+      service,
+      params.startDate,
+      params.endDate
+    );
+
+    // Generate the Excel workbook in memory.
+    const workbookBuffer = await writeWorkbook(sorted);
+
+    // Store the generated report in private Vercel Blob storage.
+    // The returned blob:<pathname> value is saved in the database.
+    const filePath = await storePrivateFile(
+      "reports",
+      filename,
+      workbookBuffer,
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+
+    const fileSize = workbookBuffer.byteLength;
     const countTotal = sumCount(sorted);
     const revenueTotal = sumRevenue(sorted).toFixed(2);
 
@@ -267,20 +348,35 @@ export async function generateBatch(params: {
     });
   }
 
-  const matchedCount = sumCount(matched as unknown as SourceRow[]);
-  const matchedRevenue = sumRevenue(matched as unknown as SourceRow[]);
-  const unmatchedCount = sumCount(unmatchedRows as unknown as SourceRow[]);
-  const unmatchedRevenue = sumRevenue(unmatchedRows as unknown as SourceRow[]);
+  const matchedCount = sumCount(
+    matched as unknown as SourceRow[]
+  );
+
+  const matchedRevenue = sumRevenue(
+    matched as unknown as SourceRow[]
+  );
+
+  const unmatchedCount = sumCount(
+    unmatchedRows as unknown as SourceRow[]
+  );
+
+  const unmatchedRevenue = sumRevenue(
+    unmatchedRows as unknown as SourceRow[]
+  );
+
   const validSourceCount = matchedCount + unmatchedCount;
   const validSourceRevenue = matchedRevenue + unmatchedRevenue;
+
   const balanced =
-    Math.abs(validSourceRevenue - (matchedRevenue + unmatchedRevenue)) < 0.005 &&
+    Math.abs(
+      validSourceRevenue - (matchedRevenue + unmatchedRevenue)
+    ) < 0.005 &&
     validSourceCount === matchedCount + unmatchedCount;
 
   await db
     .update(reportBatches)
     .set({
-      status: reports.length ? "Ready for Review" : "Ready for Review",
+      status: "Ready for Review",
       sourceRows: allInRange.length,
       matchedRows: matched.length,
       unmatchedRows: unmatchedRows.length,
@@ -311,53 +407,79 @@ export async function generateBatch(params: {
   };
 }
 
-export async function readReportFile(filePath: string): Promise<Buffer | null> {
-  try {
-    const resolved = path.resolve(filePath);
-    if (!resolved.startsWith(STORAGE_ROOT)) return null;
-    return await fs.readFile(resolved);
-  } catch {
-    return null;
-  }
+/**
+ * Reads a generated report from private Blob storage.
+ * Also supports legacy local paths through readStoredFile.
+ */
+export async function readReportFile(
+  filePath: string
+): Promise<Buffer | null> {
+  return readStoredFile(filePath);
 }
 
-/** Validates that a generated workbook still exists and is a readable .xlsx. */
-export async function validateAttachment(filePath: string): Promise<{
+/** Validates that a report exists and is a readable .xlsx workbook. */
+export async function validateAttachment(
+  filePath: string
+): Promise<{
   ok: boolean;
   bytes: number;
   worksheetName?: string;
   error?: string;
 }> {
   try {
-    const resolved = path.resolve(filePath);
-    if (!resolved.startsWith(STORAGE_ROOT)) {
-      return { ok: false, bytes: 0, error: "Attachment path is outside private storage." };
+    const buf = await readStoredFile(filePath);
+
+    if (!buf) {
+      return {
+        ok: false,
+        bytes: 0,
+        error: "Attachment could not be read from private storage.",
+      };
     }
-    const stat = await fs.stat(resolved);
-    const buf = await fs.readFile(resolved);
+
     const wb = new ExcelJS.Workbook();
+
     await wb.xlsx.load(buf as unknown as ArrayBuffer);
+
     const ws = wb.worksheets[0];
-    if (!ws) return { ok: false, bytes: stat.size, error: "Workbook contains no worksheet." };
+
+    if (!ws) {
+      return {
+        ok: false,
+        bytes: buf.byteLength,
+        error: "Workbook contains no worksheet.",
+      };
+    }
+
     if (ws.name !== WORKSHEET_NAME) {
       return {
         ok: false,
-        bytes: stat.size,
+        bytes: buf.byteLength,
         worksheetName: ws.name,
         error: `Worksheet is named "${ws.name}" — required name is "${WORKSHEET_NAME}".`,
       };
     }
+
     if (wb.worksheets.length !== 1) {
       return {
         ok: false,
-        bytes: stat.size,
+        bytes: buf.byteLength,
         worksheetName: ws.name,
         error: `Workbook has ${wb.worksheets.length} worksheets — exactly one is permitted.`,
       };
     }
-    return { ok: true, bytes: stat.size, worksheetName: ws.name };
+
+    return {
+      ok: true,
+      bytes: buf.byteLength,
+      worksheetName: ws.name,
+    };
   } catch (err) {
-    return { ok: false, bytes: 0, error: `Attachment could not be read: ${(err as Error).message}` };
+    return {
+      ok: false,
+      bytes: 0,
+      error: `Attachment could not be read: ${(err as Error).message}`,
+    };
   }
 }
 
