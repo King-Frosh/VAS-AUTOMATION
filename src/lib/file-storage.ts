@@ -22,7 +22,7 @@ export async function storePrivateFile(
     }
   );
 
-  // Store the private Blob pathname, not its URL or access token.
+  // Save the private Blob pathname in the database, not its URL.
   return `${BLOB_PREFIX}${blob.pathname}`;
 }
 
@@ -38,11 +38,14 @@ export async function readStoredFile(
         return null;
       }
 
-      return Buffer.from(await new Response(result.stream).arrayBuffer());
+      return Buffer.from(
+        await new Response(result.stream).arrayBuffer()
+      );
     }
 
-    // Compatibility for existing local-storage records.
+    // Support legacy local files during local development.
     const resolved = path.resolve(storedPath);
+
     if (
       resolved !== STORAGE_ROOT &&
       !resolved.startsWith(`${STORAGE_ROOT}${path.sep}`)
@@ -59,19 +62,23 @@ export async function readStoredFile(
 export async function deleteStoredFile(
   storedPath: string
 ): Promise<void> {
-  if (storedPath.startsWith(BLOB_PREFIX)) {
-    await del(storedPath.slice(BLOB_PREFIX.length), {
-      access: "private",
-    });
-    return;
-  }
+  try {
+    if (storedPath.startsWith(BLOB_PREFIX)) {
+      await del(storedPath.slice(BLOB_PREFIX.length), {
+        access: "private",
+      });
+      return;
+    }
 
-  // Legacy local files: never delete paths outside the storage directory.
-  const resolved = path.resolve(storedPath);
-  if (
-    resolved !== STORAGE_ROOT &&
-    resolved.startsWith(`${STORAGE_ROOT}${path.sep}`)
-  ) {
-    await fs.unlink(resolved).catch(() => undefined);
+    const resolved = path.resolve(storedPath);
+
+    if (
+      resolved !== STORAGE_ROOT &&
+      resolved.startsWith(`${STORAGE_ROOT}${path.sep}`)
+    ) {
+      await fs.unlink(resolved).catch(() => undefined);
+    }
+  } catch (error) {
+    console.error("Unable to delete stored file:", error);
   }
 }
