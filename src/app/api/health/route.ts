@@ -22,7 +22,7 @@ export async function GET() {
     checks: {
       database: dbOk ? "connected" : `unavailable — ${detail}`,
       smtp: "configured through Email Settings",
-      storage: "private /storage/uploads and /storage/reports",
+      storage: "private Vercel Blob for uploads and reports",
     },
     timestamp: new Date().toISOString(),
   });
